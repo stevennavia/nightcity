@@ -296,9 +296,17 @@ export class Character {
   _startDance(name) {
     if (!this.isLocked || !this.grounded || this.isDancing) return;
     const dur = this.danceDuration[name] || 3;
+    const action = this.actions[name];
+    if (!action) return;
     this.isDancing = true;
     this.danceTimer = dur;
-    this._setAnim(name);
+    if (this.currentAction && this.currentAction !== action) {
+      this.currentAction.fadeOut(0.05);
+    }
+    action.reset().fadeIn(0).play();
+    action.setEffectiveWeight(1);
+    this.currentAction = action;
+    this.currentState = name;
   }
 
   update(delta) {
