@@ -15,10 +15,15 @@ const _moveDir = new THREE.Vector3();
 const _offset = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _rightAxis = new THREE.Vector3(1, 0, 0);
+const _rayOrigin = new THREE.Vector3();
+const _rayDir = new THREE.Vector3();
+const _raycaster = new THREE.Raycaster();
 
 export class Character {
-  constructor(scene) {
+  constructor(scene, dirLight, dirTarget) {
     this.scene = scene;
+    this.dirLight = dirLight;
+    this.dirTarget = dirTarget;
     this.position = new THREE.Vector3(0, 0, 0);
     this.model = null;
     this.mixer = null;
@@ -32,10 +37,11 @@ export class Character {
     scene.add(this.charLight2);
 
     this.yaw = 0;
-    this.pitch = -0.2;
+    this.pitch = -0.3;
     this.cameraDist = PLAYER.CAMERA_DIST;
     this.cameraDistMin = 2;
     this.cameraDistMax = 15;
+    this.targetCameraDist = this.cameraDist;
     this.cameraHeight = PLAYER.CAMERA_HEIGHT;
 
     this.speed = 0;
@@ -47,11 +53,18 @@ export class Character {
     this.shift = false;
     this.isLocked = false;
     this.slidePressed = false;
-    this.leanPressed = false;
+    this.flairPressed = false;
     this.isSliding = false;
-    this.isLeaning = false;
+    this.isFlair = false;
     this.slideTimer = 0;
-    this.leanWallInfo = null;
+    this.flairTimer = 0;
+    this.flairDuration = 1;
+    this.isDancing = false;
+    this.danceTimer = 0;
+    this.danceDuration = {};
+    this._slideY = 0;
+    this._zoomVel = 0;
+    this._zoomDamping = 0.92;
 
     this.animLoadPromise = null;
 
@@ -68,8 +81,11 @@ export class Character {
       jumpFBX,
       jumpFromWallFBX,
       wallRunFBX,
-      leaningFBX,
+      flairFBX,
       climbFBX,
+      dance1FBX,
+      dance2FBX,
+      dance3FBX,
     ] = await Promise.all([
       loader.loadAsync(ANIMS.IDLE),
       loader.loadAsync(ANIMS.RUNNING),
@@ -77,9 +93,19 @@ export class Character {
       loader.loadAsync(ANIMS.JUMP),
       loader.loadAsync(ANIMS.JUMP_FROM_WALL),
       loader.loadAsync(ANIMS.WALL_RUN),
-      loader.loadAsync(ANIMS.LEANING),
+      loader.loadAsync(ANIMS.FLAIR),
       loader.loadAsync(ANIMS.CLIMB),
+      loader.loadAsync(ANIMS.DANCE1),
+      loader.loadAsync(ANIMS.DANCE2),
+      loader.loadAsync(ANIMS.DANCE3),
     ]);
+
+    if (flairFBX.animations[0]) {
+      this.flairDuration = flairFBX.animations[0].duration;
+    }
+    if (dance1FBX.animations[0]) this.danceDuration.d1 = dance1FBX.animations[0].duration;
+    if (dance2FBX.animations[0]) this.danceDuration.d2 = dance2FBX.animations[0].duration;
+    if (dance3FBX.animations[0]) this.danceDuration.d3 = dance3FBX.animations[0].duration;
 
     this.model = idleFBX;
 
@@ -87,19 +113,44 @@ export class Character {
     const size = box.getSize(new THREE.Vector3());
     const height = size.y;
     const autoScale = (height > 10 || height < 0.5) ? (PLAYER.HEIGHT / height) : 1;
-    this.model.scale.setScalar(autoScale * 0.0784);
+    this.model.scale.setScalar(autoScale * 0.0627);
 
     this.model.position.set(0, 0, 0);
     box.setFromObject(this.model);
     this.footOffset = -box.min.y;
     this.position.y = this.footOffset;
+    this.model.raycast = () => {};
     this.scene.add(this.model);
 
     this.charHeight = box.max.y - box.min.y;
-    this.cameraDist = this.charHeight * 4;
-    this.cameraHeight = this.charHeight * 2.5;
-    this.cameraDistMin = this.charHeight * 1;
-    this.cameraDistMax = this.charHeight * 15;
+    this.cameraDist = this.charHeight * 2.2;
+    this.targetCameraDist = this.cameraDist;
+    this.cameraHeight = this.charHeight * 1.6;
+    this.cameraDistMin = this.charHeight * 0.4;
+    this.cameraDistMax = this.charHeight * 25;
+
+    // Shadow circle on ground
+    const sSize = 256;
+    const sc = document.createElement('canvas');
+    sc.width = sc.height = sSize;
+    const sctx = sc.getContext('2d');
+    const half = sSize / 2;
+    const sg = sctx.createRadialGradient(half, half, 0, half, half, half);
+    sg.addColorStop(0, 'rgba(0,0,0,0.25)');
+    sg.addColorStop(0.2, 'rgba(0,0,0,0.18)');
+    sg.addColorStop(0.5, 'rgba(0,0,0,0.08)');
+    sg.addColorStop(1, 'rgba(0,0,0,0)');
+    sctx.fillStyle = sg;
+    sctx.fillRect(0, 0, sSize, sSize);
+    const stex = new THREE.CanvasTexture(sc);
+    stex.minFilter = THREE.LinearMipmapLinearFilter;
+    stex.magFilter = THREE.LinearFilter;
+    const smat = new THREE.MeshBasicMaterial({ map: stex, transparent: true, depthWrite: false, opacity: 0.6 });
+    this.shadowDisc = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), smat);
+    this.shadowDisc.rotation.x = -Math.PI / 2;
+    this.shadowDisc.scale.set(this.charHeight * 1.8, this.charHeight * 1.8, 1);
+    this.shadowDisc.position.y = 0.01;
+    this.scene.add(this.shadowDisc);
 
     this.mixer = new THREE.AnimationMixer(this.model);
 
@@ -110,8 +161,11 @@ export class Character {
       jump: jumpFBX.animations[0],
       jumpFromWall: jumpFromWallFBX.animations[0],
       wallRun: wallRunFBX.animations[0],
-      lean: leaningFBX.animations[0],
+      flair: flairFBX.animations[0],
       climb: climbFBX.animations[0],
+      dance1: dance1FBX.animations[0],
+      dance2: dance2FBX.animations[0],
+      dance3: dance3FBX.animations[0],
     };
 
     for (const [name, clip] of Object.entries(clips)) {
@@ -167,12 +221,15 @@ export class Character {
         case 'KeyD': this.keys.right = true; break;
         case 'ShiftLeft': case 'ShiftRight':
           this.shift = true;
-          if (this.keys.forward && this.grounded && !this.isSliding) {
+          if ((this.keys.forward || this.keys.backward || this.keys.left || this.keys.right) && this.grounded && !this.isSliding) {
             this.slidePressed = true;
           }
           break;
         case 'Space': this._jump(); break;
-        case 'KeyE': this.leanPressed = true; break;
+        case 'KeyE': this.flairPressed = true; break;
+        case 'Digit1': this._startDance('dance1'); break;
+        case 'Digit2': this._startDance('dance2'); break;
+        case 'Digit3': this._startDance('dance3'); break;
       }
     });
 
@@ -183,7 +240,7 @@ export class Character {
         case 'KeyA': this.keys.left = false; break;
         case 'KeyD': this.keys.right = false; break;
         case 'ShiftLeft': case 'ShiftRight': this.shift = false; break;
-        case 'KeyE': this.leanPressed = false; break;
+        case 'KeyE': this.flairPressed = false; break;
       }
     });
 
@@ -195,12 +252,12 @@ export class Character {
       if (!this.isLocked) return;
       this.yaw -= e.movementX * PLAYER.MOUSE_SENSITIVITY;
       this.pitch -= e.movementY * PLAYER.MOUSE_SENSITIVITY;
-      this.pitch = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 3, this.pitch));
+      const maxDown = Math.atan2(this.cameraHeight, this.cameraDist) * 0.85;
+      this.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(maxDown, this.pitch));
     });
 
     document.addEventListener('wheel', (e) => {
-      this.cameraDist += e.deltaY * 0.01;
-      this.cameraDist = Math.max(this.cameraDistMin, Math.min(this.cameraDistMax, this.cameraDist));
+      this._zoomVel += e.deltaY * 0.005;
     });
   }
 
@@ -217,7 +274,9 @@ export class Character {
   }
 
   get cameraPosition() {
-    _offset.set(0, this.cameraHeight, this.cameraDist);
+    const upFactor = 1 - Math.max(0, -this.pitch) / (Math.PI / 2.2) * 0.3;
+    const effectiveDist = this.cameraDist * upFactor;
+    _offset.set(0, this.cameraHeight, effectiveDist);
     _offset.applyAxisAngle(_rightAxis, this.pitch);
     _offset.applyAxisAngle(_up, this.yaw);
     return new THREE.Vector3(
@@ -234,8 +293,27 @@ export class Character {
     }
   }
 
+  _startDance(name) {
+    if (!this.isLocked || !this.grounded || this.isDancing) return;
+    const dur = this.danceDuration[name] || 3;
+    this.isDancing = true;
+    this.danceTimer = dur;
+    this._setAnim(name);
+  }
+
   update(delta) {
     if (!this.model || !this.mixer) return;
+
+    // Smooth zoom with inertia
+    this._zoomVel *= this._zoomDamping;
+    this.targetCameraDist += this._zoomVel * delta * 60;
+    this.targetCameraDist = Math.max(this.cameraDistMin, Math.min(this.cameraDistMax, this.targetCameraDist));
+    if (Math.abs(this._zoomVel) < 0.001) this._zoomVel = 0;
+    this.cameraDist += (this.targetCameraDist - this.cameraDist) * Math.min(1, 16 * delta);
+
+    // Clamp pitch to prevent camera going underground
+    const maxDown = Math.atan2(this.cameraHeight, this.cameraDist) * 0.85;
+    this.pitch = Math.max(-Math.PI / 2 + 0.05, Math.min(maxDown, this.pitch));
 
     _forward.set(0, 0, -1).applyAxisAngle(_up, this.yaw);
     _right.set(1, 0, 0).applyAxisAngle(_up, this.yaw);
@@ -249,8 +327,10 @@ export class Character {
     const moving = _moveDir.lengthSq() > 0;
     if (moving) _moveDir.normalize();
 
-    // Wall detection
-    const wall = detectWall(this.scene, this.position, PLAYER.HEIGHT);
+    // Wall detection — only when airborne (for wall jump)
+    const wall = !this.grounded
+      ? detectWall(this.scene, this.position, PLAYER.HEIGHT)
+      : { hit: false };
 
     // --- State transitions ---
 
@@ -261,26 +341,35 @@ export class Character {
       }
     }
 
-    if (this.isLeaning) {
-      if (!this.leanPressed || !wall.hit) {
-        this.isLeaning = false;
-        this.leanWallInfo = null;
+    if (this.isFlair) {
+      this.flairTimer -= delta;
+      if (this.flairTimer <= 0) {
+        this.isFlair = false;
       }
     }
 
-    // Slide trigger: shift while moving forward
-    if (this.slidePressed && !this.isSliding && this.grounded && this.keys.forward) {
+    if (this.isDancing) {
+      this.danceTimer -= delta;
+      if (this.danceTimer <= 0) {
+        this.isDancing = false;
+      }
+    }
+
+    // Slide trigger: shift while moving
+    if (this.slidePressed && !this.isSliding && this.grounded && moving) {
       this.isSliding = true;
       this.slideTimer = 0.8;
       this.slidePressed = false;
     }
     this.slidePressed = false;
 
-    // Lean trigger: E near wall
-    if (this.leanPressed && wall.hit && !this.isLeaning && this.grounded) {
-      this.isLeaning = true;
-      this.leanWallInfo = wall;
+    // Flair trigger: E
+    if (this.flairPressed && !this.isFlair && this.grounded) {
+      this.isFlair = true;
+      this.flairTimer = this.flairDuration;
+      this.flairPressed = false;
     }
+    this.flairPressed = false;
 
     // Jump from wall
     if (!this.grounded && wall.hit && wall.distance < 2.0 && this.keys.forward) {
@@ -288,32 +377,81 @@ export class Character {
     }
 
     // --- Movement ---
-    const targetSpeed = (this.isSliding || this.isLeaning)
-      ? 0
-      : moving
-        ? PLAYER.RUN_SPEED
-        : 0;
+    const targetSpeed = this.isSliding
+      ? PLAYER.RUN_SPEED * 1.5
+      : (this.isFlair || this.isDancing)
+        ? 0
+        : moving
+          ? PLAYER.RUN_SPEED
+          : 0;
     this.speed += (targetSpeed - this.speed) * Math.min(1, 10 * delta);
 
+    let moveX, moveZ;
     if (this.isSliding) {
-      const slideDir = new THREE.Vector3(0, 0, -1).applyAxisAngle(_up, this.yaw);
-      this.position.x += slideDir.x * PLAYER.RUN_SPEED * 1.5 * delta;
-      this.position.z += slideDir.z * PLAYER.RUN_SPEED * 1.5 * delta;
+      moveX = _moveDir.x * this.speed * delta;
+      moveZ = _moveDir.z * this.speed * delta;
     } else {
-      this.position.x += _moveDir.x * this.speed * delta;
-      this.position.z += _moveDir.z * this.speed * delta;
+      moveX = _moveDir.x * this.speed * delta;
+      moveZ = _moveDir.z * this.speed * delta;
     }
 
-    // Gravity
-    this.verticalVel += PLAYER.GRAVITY * delta;
-    this.position.y += this.verticalVel * delta;
-    if (this.position.y <= this.footOffset) {
+    if (moveX !== 0 || moveZ !== 0) {
+      this._collTick = (this._collTick || 0) + 1;
+      let finalX = moveX;
+      let finalZ = moveZ;
+      if (this._collTick % 2 === 0) {
+        const moveDist = Math.sqrt(moveX * moveX + moveZ * moveZ);
+        if (moveDist > 0.0001) {
+          _rayDir.set(moveX / moveDist, 0, moveZ / moveDist);
+          _rayOrigin.set(this.position.x, this.position.y + this.charHeight * 0.4, this.position.z);
+          _raycaster.set(_rayOrigin, _rayDir);
+          _raycaster.far = moveDist + 0.3;
+
+          const targets = this.scene.userData.cityMeshes || this.scene.children;
+          const hits = _raycaster.intersectObjects(targets, false);
+          let hitDist = moveDist + 0.3;
+          for (const hit of hits) {
+            if (hit.distance > 0.01 && hit.distance < hitDist) {
+              hitDist = hit.distance;
+            }
+          }
+
+          if (hitDist > 0.3) {
+            const allowed = Math.max(0, hitDist - 0.3);
+            finalX = _rayDir.x * Math.min(allowed, moveDist);
+            finalZ = _rayDir.z * Math.min(allowed, moveDist);
+          }
+        }
+      }
+      this.position.x += finalX;
+      this.position.z += finalZ;
+    }
+
+    // Gravity — only apply when airborne
+    if (this.grounded) {
       this.position.y = this.footOffset;
       this.verticalVel = 0;
-      this.grounded = true;
+    } else {
+      this.verticalVel += PLAYER.GRAVITY * delta;
+      this.position.y += this.verticalVel * delta;
+      if (this.position.y <= this.footOffset) {
+        this.position.y = this.footOffset;
+        this.verticalVel = 0;
+        this.grounded = true;
+      }
     }
 
-    this.model.position.copy(this.position);
+    if (!this.isDancing) {
+      const targetYOffset = this.isSliding
+        ? -this.charHeight * 0.25
+        : this.isFlair
+          ? -this.charHeight * 0.2
+          : 0;
+      this._slideY += (targetYOffset - this._slideY) * Math.min(1, 10 * delta);
+    }
+    this.model.position.set(this.position.x, this.position.y + this._slideY, this.position.z);
+    this.shadowDisc.position.x = this.position.x;
+    this.shadowDisc.position.z = this.position.z;
 
     // Follow lights
     this.charLight.position.set(
@@ -323,8 +461,21 @@ export class Character {
       this.position.x - 1, this.position.y + this.charHeight * 0.5, this.position.z - 1,
     );
 
+    // Shadow light follows character
+    this.dirLight.position.set(
+      this.position.x + 5, this.position.y + 15, this.position.z + 5
+    );
+    this.dirTarget.position.copy(this.position);
+    this.dirTarget.updateMatrixWorld();
+    const s = this.charHeight * 2;
+    this.dirLight.shadow.camera.left = -s;
+    this.dirLight.shadow.camera.right = s;
+    this.dirLight.shadow.camera.top = s;
+    this.dirLight.shadow.camera.bottom = -s;
+    this.dirLight.shadow.camera.updateProjectionMatrix();
+
     // Model rotation
-    if (moving && !this.isSliding && !this.isLeaning) {
+    if (moving && !this.isSliding && !this.isFlair && !this.isDancing) {
       const targetAngle = Math.atan2(_moveDir.x, _moveDir.z);
       let diff = targetAngle - this.model.rotation.y;
       while (diff > Math.PI) diff -= Math.PI * 2;
@@ -335,15 +486,10 @@ export class Character {
     // --- Animation state ---
     if (this.isSliding) {
       this._setAnim('slide');
-    } else if (this.isLeaning) {
-      this._setAnim('lean');
-      if (this.leanWallInfo) {
-        const wallAngle = Math.atan2(this.leanWallInfo.normal.x, this.leanWallInfo.normal.z);
-        let diff = (wallAngle + Math.PI) - this.model.rotation.y;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        this.model.rotation.y += diff * Math.min(1, 8 * delta);
-      }
+    } else if (this.isFlair) {
+      this._setAnim('flair');
+    } else if (this.isDancing) {
+      // _startDance already set the anim
     } else if (!this.grounded) {
       if (wall.hit && wall.distance < 2.5) {
         this._setAnim('jumpFromWall');
@@ -357,5 +503,11 @@ export class Character {
     }
 
     this.mixer.update(delta);
+
+    if (this.isDancing) {
+      const b = new THREE.Box3().setFromObject(this.model);
+      this._slideY -= b.min.y;
+      this.model.position.y = this.position.y + this._slideY;
+    }
   }
 }

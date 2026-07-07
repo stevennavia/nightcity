@@ -1,8 +1,8 @@
 export const PLAYER = {
   HEIGHT: 1.7,
   WALK_SPEED: 0.2,
-  RUN_SPEED: 2.5,
-  JUMP_FORCE: 5,
+  RUN_SPEED: 1.0,
+  JUMP_FORCE: 3.5,
   GRAVITY: -18,
   MOUSE_SENSITIVITY: 0.0008,
   CAMERA_DIST: 2,
@@ -35,4 +35,8 @@ export const ANIMS = {
   WALL_RUN: '/Wall Run.fbx',
   LEANING: '/Leaning.fbx',
   CLIMB: '/Climbing Up Wall.fbx',
+  FLAIR: '/Flair.fbx',
+  DANCE1: '/d1.fbx',
+  DANCE2: '/d2.fbx',
+  DANCE3: '/d3.fbx',
 };
